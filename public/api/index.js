@@ -270,9 +270,10 @@ app.post('/chat-stream', async (req, res) => {
   }
 });
 
-// Jalankan Server Express
 if (process.env.NODE_ENV !== 'production') {
   app.listen(PORT, () => {
     console.log(`Server Express berjalan di http://localhost:${PORT}`);
   });
 }
+
+export default app;
