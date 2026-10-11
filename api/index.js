@@ -14,7 +14,7 @@ const __dirname = path.dirname(__filename);
 // Setup Middleware
 app.use(cors());
 app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, '..', 'public')));
 
 // Setup Multer untuk menyimpan upload file sementara di memory buffer
 const upload = multer({ storage: multer.memoryStorage() });

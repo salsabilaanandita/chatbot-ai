@@ -1,68 +1,191 @@
 /**
  * Chatbot AI - Client Application with Chat History & Multi-Session
+ * Compact, modular, and full-featured
  */
-
 document.addEventListener('DOMContentLoaded', () => {
-  // Elements
-  const chatForm = document.getElementById('chat-form');
-  const promptInput = document.getElementById('prompt-input');
-  const btnSend = document.getElementById('btn-send');
-  const btnStop = document.getElementById('btn-stop');
-  const messagesContainer = document.getElementById('messages-container');
-  const messagesList = document.getElementById('messages-list');
-  const welcomeScreen = document.getElementById('welcome-screen');
-  const typingIndicator = document.getElementById('typing-indicator');
-  const btnClearChat = document.getElementById('btn-clear-chat');
-  const btnNewChat = document.getElementById('btn-new-chat');
-  const btnToggleSidebar = document.getElementById('btn-toggle-sidebar');
-  const btnCloseSidebar = document.getElementById('btn-close-sidebar');
-  const sidebar = document.getElementById('sidebar');
-  const historyList = document.getElementById('history-list');
-  const historyCount = document.getElementById('history-count');
+  const $ = (id) => document.getElementById(id);
+
+  // DOM Elements
+  const chatForm = $('chat-form');
+  const promptInput = $('prompt-input');
+  const btnSend = $('btn-send');
+  const btnStop = $('btn-stop');
+  const messagesContainer = $('messages-container');
+  const messagesList = $('messages-list');
+  const welcomeScreen = $('welcome-screen');
+  const typingIndicator = $('typing-indicator');
+  const btnClearChat = $('btn-clear-chat');
+  const btnNewChat = $('btn-new-chat');
+  const btnToggleSidebar = $('btn-toggle-sidebar');
+  const btnCloseSidebar = $('btn-close-sidebar');
+  const sidebar = $('sidebar');
+  const historyList = $('history-list');
+  const historyCount = $('history-count');
 
   // File Upload Elements
-  const btnAttach = document.getElementById('btn-attach');
-  const attachMenu = document.getElementById('attach-menu');
-  const optImage = document.getElementById('opt-image');
-  const optDoc = document.getElementById('opt-doc');
-  const optAudio = document.getElementById('opt-audio');
-  const fileInputImage = document.getElementById('file-input-image');
-  const fileInputDoc = document.getElementById('file-input-doc');
-  const fileInputAudio = document.getElementById('file-input-audio');
-  const attachmentPreview = document.getElementById('attachment-preview');
-  const previewThumbBox = document.getElementById('preview-thumb-box');
-  const previewIcon = document.getElementById('preview-icon');
-  const previewName = document.getElementById('preview-name');
-  const previewSize = document.getElementById('preview-size');
-  const btnRemoveAttachment = document.getElementById('btn-remove-attachment');
+  const btnAttach = $('btn-attach');
+  const attachMenu = $('attach-menu');
+  const fileInputs = {
+    image: $('file-input-image'),
+    doc: $('file-input-doc'),
+    audio: $('file-input-audio'),
+  };
+  const attachmentPreview = $('attachment-preview');
+  const previewThumbBox = $('preview-thumb-box');
+  const previewName = $('preview-name');
+  const previewSize = $('preview-size');
+  const btnRemoveAttachment = $('btn-remove-attachment');
 
-  // Multi-Session Chat State
+  // State
   const STORAGE_KEY = 'gemini_pixel_sessions';
   const ACTIVE_KEY = 'gemini_pixel_active_session';
   let sessions = [];
   let currentSessionId = null;
-  let currentAttachment = null; // { file: File, type: 'image' | 'doc' | 'audio', previewUrl: string, base64?: string }
+  let currentAttachment = null;
   let isGenerating = false;
-  let currentAbortController = null;
+  let abortController = null;
 
-  // Configure Marked with highlight.js
+  // Configure Marked
   if (window.marked && window.hljs) {
     marked.setOptions({
-      highlight: function (code, lang) {
-        if (lang && hljs.getLanguage(lang)) {
-          return hljs.highlight(code, { language: lang }).value;
-        }
-        return hljs.highlightAuto(code).value;
-      },
+      highlight: (code, lang) => (lang && hljs.getLanguage(lang))
+        ? hljs.highlight(code, { language: lang }).value
+        : hljs.highlightAuto(code).value,
       breaks: true,
       gfm: true,
     });
   }
 
-  // =========================================================================
-  // Session & LocalStorage Management
-  // =========================================================================
-  function loadSessions() {
+  // --- Helpers ---
+  const escapeHtml = (str) => (str || '').replace(/[&<>"']/g, (m) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'
+  })[m]);
+
+  const getTimeStr = () => new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+  const formatBytes = (b = 0) => {
+    if (!b) return '0 B';
+    const i = Math.floor(Math.log(b) / Math.log(1024));
+    return (b / Math.pow(1024, i)).toFixed(1) + ' ' + ['B', 'KB', 'MB', 'GB'][i];
+  };
+
+  const renderMarkdown = (text) => {
+    try {
+      return window.marked ? marked.parse(text) : escapeHtml(text);
+    } catch {
+      return escapeHtml(text);
+    }
+  };
+
+  const copyToClipboard = async (text, btn, successLabel) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      const original = btn.innerHTML;
+      btn.innerHTML = `<i class="fa-solid fa-check" style="color:#16a34a"></i> ${successLabel || ''}`;
+      setTimeout(() => (btn.innerHTML = original), 1800);
+    } catch (e) {
+      console.error('Copy failed:', e);
+    }
+  };
+
+  const scrollToBottom = () => {
+    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+  };
+
+  const setLoading = (loading) => {
+    isGenerating = loading;
+    btnSend.style.display = loading ? 'none' : 'flex';
+    if (btnStop) btnStop.style.display = loading ? 'flex' : 'none';
+    typingIndicator.style.display = loading ? 'flex' : 'none';
+    if (!loading) abortController = null;
+  };
+
+  // --- Session Management ---
+  const getCurrentSession = () => sessions.find((s) => s.id === currentSessionId);
+
+  const saveSessions = () => {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(sessions));
+      if (currentSessionId) localStorage.setItem(ACTIVE_KEY, currentSessionId);
+    } catch (e) {
+      console.warn('Storage error:', e);
+    }
+  };
+
+  const createNewSession = (switchNow = true) => {
+    const s = {
+      id: 'chat_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+      title: 'Obrolan Baru',
+      timestamp: Date.now(),
+      messages: [],
+      conversationHistory: [],
+    };
+    sessions.unshift(s);
+    currentSessionId = s.id;
+    saveSessions();
+    renderHistory();
+    if (switchNow) {
+      renderActiveMessages();
+      clearAttachment();
+      promptInput.value = '';
+      promptInput.style.height = 'auto';
+      promptInput.focus();
+    }
+  };
+
+  const switchSession = (id) => {
+    if (currentSessionId === id) return;
+    currentSessionId = id;
+    saveSessions();
+    renderHistory();
+    renderActiveMessages();
+    clearAttachment();
+    promptInput.focus();
+    if (window.innerWidth <= 768) sidebar.classList.remove('open');
+  };
+
+  const deleteSession = (id, e) => {
+    if (e) e.stopPropagation();
+    sessions = sessions.filter((s) => s.id !== id);
+    if (!sessions.length) return createNewSession(true);
+    if (currentSessionId === id) currentSessionId = sessions[0].id;
+    saveSessions();
+    renderHistory();
+    renderActiveMessages();
+  };
+
+  const renderHistory = () => {
+    if (!historyList) return;
+    historyList.innerHTML = '';
+    if (historyCount) historyCount.textContent = sessions.length;
+
+    if (!sessions.length) {
+      historyList.innerHTML = `<div class="history-empty"><span class="history-empty-icon">🎮</span><span class="history-empty-text">BELUM ADA RIWAYAT CHAT</span></div>`;
+      return;
+    }
+
+    sessions.forEach((s) => {
+      const item = document.createElement('div');
+      item.className = `history-item ${s.id === currentSessionId ? 'active' : ''}`;
+      const d = s.timestamp ? new Date(s.timestamp) : new Date();
+      const timeStr = d.toDateString() === new Date().toDateString()
+        ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        : d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+
+      item.innerHTML = `
+        <div class="history-item-content">
+          <span class="history-item-title">${escapeHtml(s.title || 'Obrolan Baru')}</span>
+          <span class="history-item-meta">${timeStr} · ${(s.messages || []).length} pesan</span>
+        </div>
+        <button class="btn-delete-session" title="Hapus Percakapan">✕</button>
+      `;
+      item.onclick = () => switchSession(s.id);
+      item.querySelector('.btn-delete-session').onclick = (ev) => deleteSession(s.id, ev);
+      historyList.appendChild(item);
+    });
+  };
+
+  const loadSessions = () => {
     try {
       const stored = localStorage.getItem(STORAGE_KEY);
       sessions = stored ? JSON.parse(stored) : [];
@@ -70,492 +193,347 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch {
       sessions = [];
     }
-
     currentSessionId = localStorage.getItem(ACTIVE_KEY);
-
-    if (sessions.length === 0) {
+    if (!sessions.length) {
       createNewSession(false);
     } else {
-      const exists = sessions.some((s) => s.id === currentSessionId);
-      if (!exists) {
-        currentSessionId = sessions[0].id;
-      }
+      if (!sessions.some((s) => s.id === currentSessionId)) currentSessionId = sessions[0].id;
       saveSessions();
-      renderHistoryList();
-      renderActiveSessionMessages();
+      renderHistory();
+      renderActiveMessages();
     }
-  }
+  };
 
-  function saveSessions() {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(sessions));
-      if (currentSessionId) {
-        localStorage.setItem(ACTIVE_KEY, currentSessionId);
-      }
-    } catch (e) {
-      console.warn('LocalStorage quota or save error:', e);
+  // --- Attachments & Drag-and-Drop ---
+  const handleFile = (file, type) => {
+    const previewUrl = type === 'image' ? URL.createObjectURL(file) : null;
+    if (previewThumbBox) {
+      if (type === 'image') previewThumbBox.innerHTML = `<img src="${previewUrl}" class="preview-img-thumb" alt="Thumbnail">`;
+      else previewThumbBox.innerHTML = `<span class="pill-icon"><i class="fa-solid ${type === 'audio' ? 'fa-microphone' : 'fa-file-lines'}"></i></span>`;
     }
-  }
-
-  function getCurrentSession() {
-    return sessions.find((s) => s.id === currentSessionId);
-  }
-
-  function createNewSession(switchImmediately = true) {
-    const newSession = {
-      id: 'chat_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
-      title: 'Obrolan Baru',
-      timestamp: Date.now(),
-      messages: [],
-      conversationHistory: [],
-    };
-
-    sessions.unshift(newSession);
-    currentSessionId = newSession.id;
-    saveSessions();
-    renderHistoryList();
-
-    if (switchImmediately) {
-      renderActiveSessionMessages();
-      clearAttachment();
-      promptInput.value = '';
-      promptInput.style.height = 'auto';
-      promptInput.focus();
-    }
-  }
-
-  function switchSession(sessionId) {
-    if (currentSessionId === sessionId) return;
-    currentSessionId = sessionId;
-    saveSessions();
-    renderHistoryList();
-    renderActiveSessionMessages();
-    clearAttachment();
+    currentAttachment = { file, type, name: file.name, size: file.size, previewUrl };
+    previewName.textContent = file.name;
+    previewSize.textContent = formatBytes(file.size);
+    attachmentPreview.style.display = 'flex';
     promptInput.focus();
+  };
 
-    if (window.innerWidth <= 768) {
-      sidebar.classList.remove('open');
-    }
-  }
+  const clearAttachment = () => {
+    if (currentAttachment?.previewUrl) URL.revokeObjectURL(currentAttachment.previewUrl);
+    currentAttachment = null;
+    attachmentPreview.style.display = 'none';
+    if (previewThumbBox) previewThumbBox.innerHTML = `<span class="pill-icon" id="preview-icon"><i class="fa-solid fa-paperclip"></i></span>`;
+    Object.values(fileInputs).forEach((i) => i && (i.value = ''));
+  };
 
-  function deleteSession(sessionId, e) {
-    if (e) e.stopPropagation();
+  btnAttach?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    attachMenu.classList.toggle('active');
+  });
+  document.addEventListener('click', () => attachMenu?.classList.remove('active'));
+  attachMenu?.addEventListener('click', (e) => e.stopPropagation());
 
-    sessions = sessions.filter((s) => s.id !== sessionId);
-
-    if (sessions.length === 0) {
-      createNewSession(true);
-      return;
-    }
-
-    if (currentSessionId === sessionId) {
-      currentSessionId = sessions[0].id;
-    }
-
-    saveSessions();
-    renderHistoryList();
-    renderActiveSessionMessages();
-  }
-
-  function renderHistoryList() {
-    if (!historyList) return;
-    historyList.innerHTML = '';
-    if (historyCount) historyCount.textContent = sessions.length;
-
-    if (sessions.length === 0) {
-      historyList.innerHTML = `
-        <div class="history-empty">
-          <span class="history-empty-icon">🎮</span>
-          <span class="history-empty-text">BELUM ADA RIWAYAT CHAT</span>
-        </div>
-      `;
-      return;
-    }
-
-    sessions.forEach((session) => {
-      const item = document.createElement('div');
-      item.className = `history-item ${session.id === currentSessionId ? 'active' : ''}`;
-      
-      const timeStr = formatHistoryTime(session.timestamp);
-
-      item.innerHTML = `
-        <div class="history-item-content">
-          <span class="history-item-title">${escapeHtml(session.title || 'Obrolan Baru')}</span>
-          <span class="history-item-meta">${timeStr} · ${session.messages ? session.messages.length : 0} pesan</span>
-        </div>
-        <button class="btn-delete-session" title="Hapus Percakapan ini">✕</button>
-      `;
-
-      item.addEventListener('click', () => switchSession(session.id));
-
-      const delBtn = item.querySelector('.btn-delete-session');
-      delBtn.addEventListener('click', (ev) => deleteSession(session.id, ev));
-
-      historyList.appendChild(item);
+  const pickTypes = { 'opt-image': 'image', 'opt-doc': 'doc', 'opt-audio': 'audio' };
+  Object.entries(pickTypes).forEach(([btnId, type]) => {
+    $(btnId)?.addEventListener('click', () => {
+      fileInputs[type]?.click();
+      attachMenu.classList.remove('active');
     });
-  }
+    fileInputs[type]?.addEventListener('change', (e) => {
+      if (e.target.files[0]) handleFile(e.target.files[0], type);
+    });
+  });
 
-  function formatHistoryTime(ts) {
-    if (!ts) return 'Hari ini';
-    const d = new Date(ts);
-    const now = new Date();
-    if (d.toDateString() === now.toDateString()) {
-      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    }
-    return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
-  }
+  btnRemoveAttachment?.addEventListener('click', clearAttachment);
 
-  function renderActiveSessionMessages() {
-    const session = getCurrentSession();
+  document.addEventListener('dragover', (e) => e.preventDefault());
+  document.addEventListener('drop', (e) => {
+    e.preventDefault();
+    const f = e.dataTransfer?.files?.[0];
+    if (!f) return;
+    const type = f.type.startsWith('image/') ? 'image' : f.type.startsWith('audio/') ? 'audio' : 'doc';
+    handleFile(f, type);
+  });
+
+  // --- Code Copy Enhancement ---
+  const enhanceCodeBlocks = (container) => {
+    container.querySelectorAll('pre').forEach((pre) => {
+      if (pre.parentElement?.classList.contains('code-wrapper')) return;
+      const codeEl = pre.querySelector('code');
+      const text = codeEl ? codeEl.innerText : pre.innerText;
+      const langClass = Array.from(codeEl?.classList || []).find((c) => c.startsWith('language-'));
+      const lang = langClass ? langClass.replace('language-', '').toUpperCase() : 'CODE';
+
+      const wrap = document.createElement('div');
+      wrap.className = 'code-wrapper';
+      wrap.innerHTML = `<div class="code-header"><span>[ ${lang} ]</span><button class="code-copy-btn"><i class="fa-regular fa-copy"></i> SALIN</button></div>`;
+      const copyBtn = wrap.querySelector('.code-copy-btn');
+      copyBtn.onclick = () => copyToClipboard(text, copyBtn, 'TERSALIN!');
+
+      pre.parentNode.insertBefore(wrap, pre);
+      wrap.appendChild(pre);
+    });
+  };
+
+  // --- Message Rendering & Inline Editing ---
+  const renderActiveMessages = () => {
+    const s = getCurrentSession();
     messagesList.innerHTML = '';
-
-    if (!session || !session.messages || session.messages.length === 0) {
+    if (!s || !s.messages?.length) {
       welcomeScreen.style.display = 'flex';
       return;
     }
-
     welcomeScreen.style.display = 'none';
+    s.messages.forEach((m, idx) => {
+      if (m.role === 'user') renderUserMessage(m.text, m.attachment, m.time, idx);
+      else renderBotMessage(m.text, m.time);
+    });
+    scrollToBottom();
+  };
 
-    session.messages.forEach((msg, idx) => {
-      if (msg.role === 'user') {
-        renderUserMessageToDOM(msg.text, msg.attachment, msg.time, idx);
-      } else {
-        renderBotMessageToDOM(msg.text, msg.time);
-      }
+  const renderUserMessage = (text, att, timeStr, idx) => {
+    const row = document.createElement('div');
+    row.className = 'message-row user';
+    if (idx !== undefined) row.dataset.msgIndex = idx;
+
+    let attHtml = '';
+    if (att) {
+      const isImg = att.type === 'image' && att.previewUrl;
+      const icon = att.type === 'audio' ? 'fa-microphone' : 'fa-file-lines';
+      attHtml = `
+        <div class="bubble-attachment">
+          ${isImg ? `<img src="${att.previewUrl}" alt="Preview">` : `<span class="bubble-att-icon"><i class="fa-solid ${icon}"></i></span>`}
+          <div class="att-info"><span class="att-name">${escapeHtml(att.name)}</span><span class="att-size">${formatBytes(att.size)}</span></div>
+        </div>`;
+    }
+
+    row.innerHTML = `
+      <div class="avatar user-avatar" title="User"><i class="fa-solid fa-user"></i></div>
+      <div class="message-content">
+        <div class="message-bubble user-bubble">
+          ${attHtml}
+          ${text ? `<div class="message-text-content"><p style="margin:0;white-space:pre-wrap;">${escapeHtml(text)}</p></div>` : ''}
+        </div>
+        <div class="message-meta-row">
+          <div class="message-actions user-actions">
+            <button class="btn-msg-action btn-copy-msg" title="Salin Pertanyaan"><i class="fa-regular fa-copy"></i></button>
+            ${text ? `<button class="btn-msg-action btn-edit-msg" title="Edit Pertanyaan"><i class="fa-solid fa-pen-to-square"></i></button>` : ''}
+          </div>
+          <span class="message-time">${timeStr || getTimeStr()}</span>
+        </div>
+      </div>`;
+
+    const copyBtn = row.querySelector('.btn-copy-msg');
+    copyBtn.onclick = () => copyToClipboard(text || att?.name || '', copyBtn);
+
+    const editBtn = row.querySelector('.btn-edit-msg');
+    if (editBtn) editBtn.onclick = () => !isGenerating && startInlineEdit(row, text, idx);
+
+    messagesList.appendChild(row);
+  };
+
+  const startInlineEdit = (row, originalText, msgIdx) => {
+    const bubble = row.querySelector('.message-bubble');
+    const meta = row.querySelector('.message-meta-row');
+    if (!bubble) return;
+    const oldHtml = bubble.innerHTML;
+    if (meta) meta.style.display = 'none';
+
+    bubble.innerHTML = `
+      <div class="inline-edit-wrapper">
+        <textarea class="inline-edit-textarea" rows="3">${escapeHtml(originalText)}</textarea>
+        <div class="inline-edit-actions">
+          <button type="button" class="btn-edit-cancel">Batal</button>
+          <button type="button" class="btn-edit-submit"><i class="fa-solid fa-paper-plane"></i> Kirim Ulang</button>
+        </div>
+      </div>`;
+
+    const ta = bubble.querySelector('.inline-edit-textarea');
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+
+    const cancel = () => {
+      bubble.innerHTML = oldHtml;
+      if (meta) meta.style.display = 'flex';
+    };
+    bubble.querySelector('.btn-edit-cancel').onclick = cancel;
+
+    const submit = () => {
+      const val = ta.value.trim();
+      if (!val) return;
+      resubmitQuestion(msgIdx, val);
+    };
+    bubble.querySelector('.btn-edit-submit').onclick = submit;
+
+    ta.onkeydown = (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
+      else if (e.key === 'Escape') cancel();
+    };
+  };
+
+  const resubmitQuestion = (msgIdx, newText) => {
+    if (isGenerating) return;
+    const s = getCurrentSession();
+    if (!s?.messages) return;
+
+    const targetIdx = (msgIdx >= 0) ? msgIdx : s.messages.length - 1;
+    s.messages = s.messages.slice(0, targetIdx);
+    s.conversationHistory = [];
+    s.messages.forEach((m) => {
+      const prefix = m.attachment ? `[File terlampir: ${m.attachment.name}] ` : '';
+      s.conversationHistory.push({ role: m.role === 'user' ? 'user' : 'model', text: prefix + m.text });
     });
 
-    scrollToBottom();
-  }
+    saveSessions();
+    renderHistory();
+    renderActiveMessages();
 
-  // =========================================================================
-  // UI Inputs & Controls
-  // =========================================================================
+    promptInput.value = newText;
+    promptInput.style.height = 'auto';
+    chatForm.dispatchEvent(new Event('submit'));
+  };
 
-  // Auto-resize textarea
+  const renderBotMessage = (markdownText, timeStr) => {
+    const row = document.createElement('div');
+    row.className = 'message-row bot';
+    row.innerHTML = `
+      <div class="avatar bot-avatar" title="Chatbot AI"><i class="fa-solid fa-robot"></i></div>
+      <div class="message-content">
+        <div class="message-bubble">${renderMarkdown(markdownText)}</div>
+        <div class="message-meta-row">
+          <div class="message-actions bot-actions">
+            <button class="btn-msg-action btn-copy-msg" title="Salin Jawaban"><i class="fa-regular fa-copy"></i></button>
+          </div>
+          <span class="message-time">${timeStr || getTimeStr()}</span>
+        </div>
+      </div>`;
+
+    const copyBtn = row.querySelector('.btn-copy-msg');
+    copyBtn.onclick = () => copyToClipboard(markdownText, copyBtn);
+    enhanceCodeBlocks(row);
+    messagesList.appendChild(row);
+  };
+
+  const createStreamingBotRow = () => {
+    const row = document.createElement('div');
+    row.className = 'message-row bot';
+    row.innerHTML = `
+      <div class="avatar bot-avatar" title="Chatbot AI"><i class="fa-solid fa-robot"></i></div>
+      <div class="message-content">
+        <div class="message-bubble"><span class="streaming-cursor">▊</span></div>
+        <div class="message-meta-row">
+          <div class="message-actions bot-actions" style="display:none;">
+            <button class="btn-msg-action btn-copy-msg" title="Salin Jawaban"><i class="fa-regular fa-copy"></i></button>
+          </div>
+          <span class="message-time">${getTimeStr()}</span>
+        </div>
+      </div>`;
+    messagesList.appendChild(row);
+    return {
+      row,
+      bubble: row.querySelector('.message-bubble'),
+      actions: row.querySelector('.bot-actions'),
+    };
+  };
+
+  const finalizeStreamingBubble = (streamUI, markdownText) => {
+    streamUI.bubble.innerHTML = renderMarkdown(markdownText);
+    enhanceCodeBlocks(streamUI.row);
+    if (streamUI.actions) {
+      streamUI.actions.style.display = 'flex';
+      const btn = streamUI.actions.querySelector('.btn-copy-msg');
+      if (btn) btn.onclick = () => copyToClipboard(markdownText, btn);
+    }
+  };
+
+  // --- Form & Submit Handling ---
   promptInput.addEventListener('input', () => {
     promptInput.style.height = 'auto';
     promptInput.style.height = Math.min(promptInput.scrollHeight, 160) + 'px';
   });
 
-  // Handle Enter key
   promptInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      if (!isGenerating) {
-        chatForm.dispatchEvent(new Event('submit'));
-      }
+      if (!isGenerating) chatForm.dispatchEvent(new Event('submit'));
     }
   });
 
-  // Attachment Menu Toggle
-  btnAttach.addEventListener('click', (e) => {
-    e.stopPropagation();
-    attachMenu.classList.toggle('active');
-  });
-
-  document.addEventListener('click', () => {
-    attachMenu.classList.remove('active');
-  });
-
-  attachMenu.addEventListener('click', (e) => {
-    e.stopPropagation();
-  });
-
-  // Attachment Options
-  optImage.addEventListener('click', () => {
-    fileInputImage.click();
-    attachMenu.classList.remove('active');
-  });
-
-  optDoc.addEventListener('click', () => {
-    fileInputDoc.click();
-    attachMenu.classList.remove('active');
-  });
-
-  optAudio.addEventListener('click', () => {
-    fileInputAudio.click();
-    attachMenu.classList.remove('active');
-  });
-
-  // File Input Changes
-  fileInputImage.addEventListener('change', (e) => {
-    if (e.target.files[0]) handleFileSelected(e.target.files[0], 'image');
-  });
-
-  fileInputDoc.addEventListener('change', (e) => {
-    if (e.target.files[0]) handleFileSelected(e.target.files[0], 'doc');
-  });
-
-  fileInputAudio.addEventListener('change', (e) => {
-    if (e.target.files[0]) handleFileSelected(e.target.files[0], 'audio');
-  });
-
-  function formatBytes(bytes) {
-    if (!bytes || bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
-  }
-
-  function handleFileSelected(file, type) {
-    let previewUrl = null;
-
-    if (type === 'image') {
-      previewUrl = URL.createObjectURL(file);
-      if (previewThumbBox) {
-        previewThumbBox.innerHTML = `<img src="${previewUrl}" class="preview-img-thumb" alt="Thumbnail">`;
-      }
-    } else if (type === 'doc') {
-      if (previewThumbBox) {
-        previewThumbBox.innerHTML = `<span class="pill-icon"><i class="fa-solid fa-file-lines"></i></span>`;
-      }
-    } else if (type === 'audio') {
-      if (previewThumbBox) {
-        previewThumbBox.innerHTML = `<span class="pill-icon"><i class="fa-solid fa-microphone"></i></span>`;
-      }
-    }
-
-    currentAttachment = {
-      file,
-      type,
-      name: file.name,
-      size: file.size,
-      previewUrl,
-    };
-
-    previewName.textContent = file.name;
-    previewSize.textContent = formatBytes(file.size);
-    attachmentPreview.style.display = 'flex';
-    promptInput.focus();
-  }
-
-  btnRemoveAttachment.addEventListener('click', clearAttachment);
-
-  function clearAttachment() {
-    if (currentAttachment && currentAttachment.previewUrl) {
-      URL.revokeObjectURL(currentAttachment.previewUrl);
-    }
-    currentAttachment = null;
-    attachmentPreview.style.display = 'none';
-    if (previewThumbBox) {
-      previewThumbBox.innerHTML = `<span class="pill-icon" id="preview-icon"><i class="fa-solid fa-paperclip"></i></span>`;
-    }
-    fileInputImage.value = '';
-    fileInputDoc.value = '';
-    fileInputAudio.value = '';
-  }
-
-  // Drag and Drop files
-  document.addEventListener('dragover', (e) => e.preventDefault());
-  document.addEventListener('drop', (e) => {
-    e.preventDefault();
-    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      const file = e.dataTransfer.files[0];
-      if (file.type.startsWith('image/')) {
-        handleFileSelected(file, 'image');
-      } else if (file.type.startsWith('audio/')) {
-        handleFileSelected(file, 'audio');
-      } else {
-        handleFileSelected(file, 'doc');
-      }
-    }
-  });
-
-  // Toggle & Close Sidebar (Support both Desktop and Mobile, like ChatGPT & Gemini)
-  function toggleSidebar() {
-    if (window.innerWidth <= 768) {
-      sidebar.classList.toggle('open');
-    } else {
-      sidebar.classList.toggle('collapsed');
-      localStorage.setItem('gemini_pixel_sidebar_collapsed', sidebar.classList.contains('collapsed'));
-    }
-  }
-
-  function closeSidebar() {
-    if (window.innerWidth <= 768) {
-      sidebar.classList.remove('open');
-    } else {
-      sidebar.classList.add('collapsed');
-      localStorage.setItem('gemini_pixel_sidebar_collapsed', 'true');
-    }
-  }
-
-  if (btnToggleSidebar) {
-    btnToggleSidebar.addEventListener('click', toggleSidebar);
-  }
-  if (btnCloseSidebar) {
-    btnCloseSidebar.addEventListener('click', closeSidebar);
-  }
-
-  // Restore collapsed state on desktop
-  if (window.innerWidth > 768 && localStorage.getItem('gemini_pixel_sidebar_collapsed') === 'true') {
-    sidebar.classList.add('collapsed');
-  }
-
-  // Suggestion Cards Click
-  document.querySelectorAll('.suggestion-card').forEach((card) => {
-    card.addEventListener('click', () => {
-      const prompt = card.getAttribute('data-prompt');
-      promptInput.value = prompt;
-      promptInput.dispatchEvent(new Event('input'));
-      chatForm.dispatchEvent(new Event('submit'));
-    });
-  });
-
-  // New Chat Button
-  btnNewChat.addEventListener('click', () => {
-    createNewSession(true);
-    if (window.innerWidth <= 768) {
-      sidebar.classList.remove('open');
-    }
-  });
-
-  // Clear Current Chat
-  btnClearChat.addEventListener('click', () => {
-    const session = getCurrentSession();
-    if (!session || (!session.messages || session.messages.length === 0)) return;
-
-    if (confirm('Bersihkan percakapan ini?')) {
-      session.messages = [];
-      session.conversationHistory = [];
-      session.title = 'Obrolan Baru';
-      saveSessions();
-      renderHistoryList();
-      renderActiveSessionMessages();
-    }
-  });
-
-  // =========================================================================
-  // Send Message & Backend Communication
-  // =========================================================================
   chatForm.addEventListener('submit', async (e) => {
     e.preventDefault();
-
     const text = promptInput.value.trim();
-    if (!text && !currentAttachment) return;
-    if (isGenerating) return;
+    if ((!text && !currentAttachment) || isGenerating) return;
 
     let session = getCurrentSession();
     if (!session) {
       createNewSession(false);
       session = getCurrentSession();
     }
-
     welcomeScreen.style.display = 'none';
 
-    // Store reference to attachment and text
     const attached = currentAttachment;
     clearAttachment();
-
-    // Reset input
     promptInput.value = '';
     promptInput.style.height = 'auto';
 
-    const timeStr = getTimeString();
-
-    // If first message, auto-title the session
-    if (!session.messages || session.messages.length === 0 || session.title === 'Obrolan Baru') {
-      session.title = text ? (text.length > 25 ? text.substring(0, 25) + '...' : text) : (attached ? attached.name : 'Percakapan');
+    const timeStr = getTimeStr();
+    if (!session.messages?.length || session.title === 'Obrolan Baru') {
+      session.title = text ? (text.length > 25 ? text.slice(0, 25) + '...' : text) : (attached ? attached.name : 'Percakapan');
     }
 
-    // Prepare attachment metadata for session storage
-    const attachmentMeta = attached ? {
+    const attMeta = attached ? {
       type: attached.type,
       name: attached.name,
       size: attached.size,
       previewUrl: attached.type === 'image' ? attached.previewUrl : null,
     } : null;
 
-    // Append to session state
     if (!session.messages) session.messages = [];
-    session.messages.push({
-      role: 'user',
-      text,
-      attachment: attachmentMeta,
-      time: timeStr,
-    });
-
+    session.messages.push({ role: 'user', text, attachment: attMeta, time: timeStr });
     saveSessions();
-    renderHistoryList();
-
-    // Render User Message to DOM
-    renderUserMessageToDOM(text, attachmentMeta, timeStr, session.messages.length - 1);
+    renderHistory();
+    renderUserMessage(text, attMeta, timeStr, session.messages.length - 1);
     scrollToBottom();
 
-    // Set Loading State with AbortController
-    currentAbortController = new AbortController();
+    abortController = new AbortController();
     setLoading(true);
 
-    let streamingUI = null;
+    let streamUI = null;
     let botText = '';
 
     try {
-      let botResponse = '';
-
       if (attached) {
-        // Send to Multimodal endpoints
         const formData = new FormData();
         formData.append('prompt', text || 'Analisis dan jelaskan berkas terlampir ini');
+        const endpoint = attached.type === 'image' ? '/generate-from-image' : attached.type === 'audio' ? '/generate-from-audio' : '/generate-from-document';
+        formData.append(attached.type === 'image' ? 'image' : attached.type === 'audio' ? 'audio' : 'document', attached.file);
 
-        let endpoint = '/generate-text';
-        if (attached.type === 'image') {
-          endpoint = '/generate-from-image';
-          formData.append('image', attached.file);
-        } else if (attached.type === 'doc') {
-          endpoint = '/generate-from-document';
-          formData.append('document', attached.file);
-        } else if (attached.type === 'audio') {
-          endpoint = '/generate-from-audio';
-          formData.append('audio', attached.file);
-        }
-
-        const res = await fetch(endpoint, {
-          method: 'POST',
-          body: formData,
-          signal: currentAbortController.signal,
-        });
-
+        const res = await fetch(endpoint, { method: 'POST', body: formData, signal: abortController.signal });
         const data = await res.json();
-        if (!res.ok) {
-          throw new Error(data.message || 'Terjadi kesalahan saat memproses file');
-        }
+        if (!res.ok) throw new Error(data.message || 'Terjadi kesalahan saat memproses file');
 
-        botResponse = data.result || 'Tidak ada teks yang dihasilkan.';
-        
-        // Push user and model to conversation history
-        const userPromptWithContext = `[File terlampir: ${attached.name}] ${text}`;
+        const botResponse = data.result || 'Tidak ada teks yang dihasilkan.';
+        const userWithContext = `[File terlampir: ${attached.name}] ${text}`;
         if (!session.conversationHistory) session.conversationHistory = [];
-        session.conversationHistory.push({ role: 'user', text: userPromptWithContext });
-        session.conversationHistory.push({ role: 'model', text: botResponse });
+        session.conversationHistory.push({ role: 'user', text: userWithContext }, { role: 'model', text: botResponse });
 
-        const botTime = getTimeString();
-        session.messages.push({
-          role: 'bot',
-          text: botResponse,
-          time: botTime,
-        });
-
+        const botTime = getTimeStr();
+        session.messages.push({ role: 'bot', text: botResponse, time: botTime });
         saveSessions();
-        renderHistoryList();
-        renderBotMessageToDOM(botResponse, botTime);
+        renderHistory();
+        renderBotMessage(botResponse, botTime);
       } else {
-        // Streaming Real-time SSE (< 1 detik mulai ketik)
         if (!session.conversationHistory) session.conversationHistory = [];
-
         const res = await fetch('/chat-stream', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            history: session.conversationHistory,
-            message: text,
-          }),
-          signal: currentAbortController.signal,
+          body: JSON.stringify({ history: session.conversationHistory, message: text }),
+          signal: abortController.signal,
         });
 
         if (!res.ok) {
           const errData = await res.json().catch(() => ({}));
-          throw new Error(errData.message || 'Gagal menghubungi Gemini API');
+          throw new Error(errData.message || 'Gagal menghubungi server');
         }
 
         const reader = res.body.getReader();
@@ -565,7 +543,6 @@ document.addEventListener('DOMContentLoaded', () => {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-
           buffer += decoder.decode(value, { stream: true });
           const parts = buffer.split('\n\n');
           buffer = parts.pop();
@@ -577,82 +554,48 @@ document.addEventListener('DOMContentLoaded', () => {
               if (dataStr === '[DONE]') break;
               try {
                 const parsed = JSON.parse(dataStr);
-                if (parsed.error) {
-                  throw new Error(parsed.error);
-                }
+                if (parsed.error) throw new Error(parsed.error);
                 if (parsed.text) {
-                  if (!streamingUI) {
+                  if (!streamUI) {
                     typingIndicator.style.display = 'none';
-                    streamingUI = createStreamingBotRow();
+                    streamUI = createStreamingBotRow();
                   }
                   botText += parsed.text;
-                  updateStreamingBubble(streamingUI.bubble, botText);
+                  streamUI.bubble.innerHTML = renderMarkdown(botText) + '<span class="streaming-cursor">▊</span>';
                   scrollToBottom();
                 }
-              } catch (e) {
-                if (e.message && !e.message.includes('JSON')) throw e;
+              } catch (err) {
+                if (!err.message?.includes('JSON')) throw err;
               }
             }
           }
         }
 
-        botResponse = botText;
-        const botTime = getTimeString();
+        const botTime = getTimeStr();
+        if (streamUI) finalizeStreamingBubble(streamUI, botText);
+        else renderBotMessage(botText || 'Tidak ada respons.', botTime);
 
-        if (streamingUI) {
-          finalizeStreamingBubble(streamingUI.row, botResponse);
-        } else {
-          renderBotMessageToDOM(botResponse || 'Tidak ada respons.', botTime);
-        }
-
-        session.conversationHistory.push({ role: 'user', text });
-        session.conversationHistory.push({ role: 'model', text: botResponse });
-
-        session.messages.push({
-          role: 'bot',
-          text: botResponse,
-          time: botTime,
-        });
-
+        session.conversationHistory.push({ role: 'user', text }, { role: 'model', text: botText });
+        session.messages.push({ role: 'bot', text: botText, time: botTime });
         saveSessions();
-        renderHistoryList();
+        renderHistory();
       }
     } catch (err) {
-      if (err.name === 'AbortError' || currentAbortController?.signal?.aborted) {
-        // Handled gracefully when user clicks Stop
-        const botTime = getTimeString();
-        const partialOrCancelledText = botText 
-          ? `${botText}\n\n*(Dihentikan)*` 
-          : '*(Respon dihentikan oleh pengguna)*';
+      const isAbort = err.name === 'AbortError' || abortController?.signal?.aborted;
+      const botTime = getTimeStr();
+      const output = isAbort
+        ? (botText ? `${botText}\n\n*(Dihentikan)*` : '*(Respon dihentikan oleh pengguna)*')
+        : `⚠️ **Error**: ${err.message || 'Gagal terhubung ke server backend'}`;
 
-        if (streamingUI) {
-          finalizeStreamingBubble(streamingUI.row, partialOrCancelledText);
-        } else {
-          renderBotMessageToDOM(partialOrCancelledText, botTime);
-        }
+      if (streamUI) finalizeStreamingBubble(streamUI, output);
+      else renderBotMessage(output, botTime);
 
-        session.messages.push({
-          role: 'bot',
-          text: partialOrCancelledText,
-          time: botTime,
-        });
-        if (botText) {
-          session.conversationHistory.push({ role: 'user', text });
-          session.conversationHistory.push({ role: 'model', text: botText });
-        }
-        saveSessions();
-        renderHistoryList();
-      } else {
-        const errText = `⚠️ **Error**: ${err.message || 'Gagal terhubung ke server backend'}`;
-        const errTime = getTimeString();
-        session.messages.push({
-          role: 'bot',
-          text: errText,
-          time: errTime,
-        });
-        saveSessions();
-        renderBotMessageToDOM(errText, errTime);
+      session.messages.push({ role: 'bot', text: output, time: botTime });
+      if (isAbort && botText) {
+        session.conversationHistory.push({ role: 'user', text }, { role: 'model', text: botText });
       }
+      saveSessions();
+      renderHistory();
     } finally {
       setLoading(false);
       scrollToBottom();
@@ -660,400 +603,56 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // Stop generation button click
-  if (btnStop) {
-    btnStop.addEventListener('click', () => {
-      if (currentAbortController) {
-        currentAbortController.abort();
-      }
-    });
-  }
+  btnStop?.addEventListener('click', () => abortController?.abort());
 
-  function setLoading(loading) {
-    isGenerating = loading;
-    if (loading) {
-      btnSend.style.display = 'none';
-      if (btnStop) btnStop.style.display = 'flex';
-      typingIndicator.style.display = 'flex';
-    } else {
-      btnSend.style.display = 'flex';
-      btnSend.disabled = false;
-      if (btnStop) btnStop.style.display = 'none';
-      typingIndicator.style.display = 'none';
-      currentAbortController = null;
+  // --- Sidebar & Utilities ---
+  const toggleSidebar = () => {
+    if (window.innerWidth <= 768) sidebar.classList.toggle('open');
+    else {
+      sidebar.classList.toggle('collapsed');
+      localStorage.setItem('gemini_pixel_sidebar_collapsed', sidebar.classList.contains('collapsed'));
     }
-  }
+  };
 
-  function scrollToBottom() {
-    messagesContainer.scrollTop = messagesContainer.scrollHeight;
-  }
-
-  function getTimeString() {
-    const now = new Date();
-    return now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  }
-
-  // =========================================================================
-  // DOM Message Rendering
-  // =========================================================================
-  function renderUserMessageToDOM(text, attachment, timeStr, msgIndex) {
-    const row = document.createElement('div');
-    row.className = 'message-row user';
-    if (msgIndex !== undefined) row.dataset.msgIndex = msgIndex;
-
-    let attachmentHtml = '';
-    if (attachment) {
-      if (attachment.type === 'image' && attachment.previewUrl) {
-        attachmentHtml = `
-          <div class="bubble-attachment">
-            <img src="${attachment.previewUrl}" alt="Attached image preview">
-            <div class="att-info">
-              <span class="att-name">${escapeHtml(attachment.name)}</span>
-              <span class="att-size">${formatBytes(attachment.size)}</span>
-            </div>
-          </div>
-        `;
-      } else {
-        const iconClass = attachment.type === 'audio' ? 'fa-microphone' : 'fa-file-lines';
-        attachmentHtml = `
-          <div class="bubble-attachment">
-            <span class="bubble-att-icon"><i class="fa-solid ${iconClass}"></i></span>
-            <div class="att-info">
-              <span class="att-name">${escapeHtml(attachment.name)}</span>
-              <span class="att-size">${formatBytes(attachment.size)}</span>
-            </div>
-          </div>
-        `;
-      }
+  btnToggleSidebar?.addEventListener('click', toggleSidebar);
+  btnCloseSidebar?.addEventListener('click', () => {
+    if (window.innerWidth <= 768) sidebar.classList.remove('open');
+    else {
+      sidebar.classList.add('collapsed');
+      localStorage.setItem('gemini_pixel_sidebar_collapsed', 'true');
     }
+  });
 
-    row.innerHTML = `
-      <div class="avatar user-avatar" title="User"><i class="fa-solid fa-user"></i></div>
-      <div class="message-content">
-        <div class="message-bubble user-bubble">
-          ${attachmentHtml}
-          ${text ? `<div class="message-text-content"><p style="margin: 0; white-space: pre-wrap;">${escapeHtml(text)}</p></div>` : ''}
-        </div>
-        <div class="message-meta-row">
-          <div class="message-actions user-actions">
-            <button class="btn-msg-action btn-copy-msg" title="Salin Pertanyaan">
-              <i class="fa-regular fa-copy"></i>
-            </button>
-            ${text ? `
-            <button class="btn-msg-action btn-edit-msg" title="Edit Pertanyaan">
-              <i class="fa-solid fa-pen-to-square"></i>
-            </button>` : ''}
-          </div>
-          <span class="message-time">${timeStr || getTimeString()}</span>
-        </div>
-      </div>
-    `;
-
-    // Hook up copy button
-    const copyBtn = row.querySelector('.btn-copy-msg');
-    if (copyBtn) {
-      copyBtn.addEventListener('click', async () => {
-        try {
-          await navigator.clipboard.writeText(text || (attachment ? attachment.name : ''));
-          copyBtn.innerHTML = `<i class="fa-solid fa-check" style="color: #16a34a;"></i>`;
-          setTimeout(() => {
-            copyBtn.innerHTML = `<i class="fa-regular fa-copy"></i>`;
-          }, 1800);
-        } catch (e) {
-          console.error(e);
-        }
-      });
-    }
-
-    // Hook up edit button
-    const editBtn = row.querySelector('.btn-edit-msg');
-    if (editBtn) {
-      editBtn.addEventListener('click', () => {
-        if (isGenerating) return;
-        startInlineEdit(row, text, msgIndex);
-      });
-    }
-
-    messagesList.appendChild(row);
+  if (window.innerWidth > 768 && localStorage.getItem('gemini_pixel_sidebar_collapsed') === 'true') {
+    sidebar.classList.add('collapsed');
   }
 
-  function startInlineEdit(row, originalText, msgIndex) {
-    const bubble = row.querySelector('.message-bubble');
-    const metaRow = row.querySelector('.message-meta-row');
-    if (!bubble) return;
+  btnNewChat?.addEventListener('click', () => {
+    createNewSession(true);
+    if (window.innerWidth <= 768) sidebar.classList.remove('open');
+  });
 
-    const previousBubbleHtml = bubble.innerHTML;
-    if (metaRow) metaRow.style.display = 'none';
+  btnClearChat?.addEventListener('click', () => {
+    const s = getCurrentSession();
+    if (!s?.messages?.length) return;
+    if (confirm('Bersihkan percakapan ini?')) {
+      s.messages = [];
+      s.conversationHistory = [];
+      s.title = 'Obrolan Baru';
+      saveSessions();
+      renderHistory();
+      renderActiveMessages();
+    }
+  });
 
-    bubble.innerHTML = `
-      <div class="inline-edit-wrapper">
-        <textarea class="inline-edit-textarea" rows="3">${escapeHtml(originalText)}</textarea>
-        <div class="inline-edit-actions">
-          <button type="button" class="btn-edit-cancel">Batal</button>
-          <button type="button" class="btn-edit-submit">
-            <i class="fa-solid fa-paper-plane"></i> Kirim Ulang
-          </button>
-        </div>
-      </div>
-    `;
-
-    const textarea = bubble.querySelector('.inline-edit-textarea');
-    textarea.focus();
-    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
-
-    // Cancel
-    const cancelBtn = bubble.querySelector('.btn-edit-cancel');
-    cancelBtn.addEventListener('click', () => {
-      bubble.innerHTML = previousBubbleHtml;
-      if (metaRow) metaRow.style.display = 'flex';
-    });
-
-    // Load to bottom input
-    const loadBtn = bubble.querySelector('.btn-edit-load');
-    loadBtn.addEventListener('click', () => {
-      promptInput.value = textarea.value;
-      promptInput.style.height = 'auto';
-      promptInput.style.height = Math.min(promptInput.scrollHeight, 160) + 'px';
-      promptInput.focus();
-      bubble.innerHTML = previousBubbleHtml;
-      if (metaRow) metaRow.style.display = 'flex';
-      scrollToBottom();
-    });
-
-    // Submit
-    const submitBtn = bubble.querySelector('.btn-edit-submit');
-    const doSubmit = () => {
-      const newText = textarea.value.trim();
-      if (!newText) return;
-      resubmitEditedQuestion(msgIndex, newText);
+  document.querySelectorAll('.suggestion-card').forEach((card) => {
+    card.onclick = () => {
+      promptInput.value = card.getAttribute('data-prompt') || '';
+      promptInput.dispatchEvent(new Event('input'));
+      chatForm.dispatchEvent(new Event('submit'));
     };
+  });
 
-    submitBtn.addEventListener('click', doSubmit);
-
-    // Keyboard shortcuts
-    textarea.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        doSubmit();
-      } else if (e.key === 'Escape') {
-        cancelBtn.click();
-      }
-    });
-  }
-
-  function resubmitEditedQuestion(msgIndex, newText) {
-    if (isGenerating) return;
-    const session = getCurrentSession();
-    if (!session || !session.messages) return;
-
-    let targetIndex = msgIndex;
-    if (targetIndex === undefined || targetIndex === '' || targetIndex < 0) {
-      targetIndex = session.messages.length - 1;
-    }
-
-    // Truncate messages to before this index
-    session.messages = session.messages.slice(0, targetIndex);
-
-    // Rebuild conversationHistory up to this point
-    session.conversationHistory = [];
-    session.messages.forEach((msg) => {
-      if (msg.role === 'user') {
-        const attachTxt = msg.attachment ? `[File terlampir: ${msg.attachment.name}] ` : '';
-        session.conversationHistory.push({ role: 'user', text: attachTxt + msg.text });
-      } else if (msg.role === 'bot') {
-        session.conversationHistory.push({ role: 'model', text: msg.text });
-      }
-    });
-
-    saveSessions();
-    renderHistoryList();
-    renderActiveSessionMessages();
-
-    // Set newText in prompt input and submit form
-    promptInput.value = newText;
-    promptInput.style.height = 'auto';
-    chatForm.dispatchEvent(new Event('submit'));
-  }
-
-  function createStreamingBotRow() {
-    const row = document.createElement('div');
-    row.className = 'message-row bot';
-    row.innerHTML = `
-      <div class="avatar bot-avatar" title="Chatbot AI"><i class="fa-solid fa-robot"></i></div>
-      <div class="message-content">
-        <div class="message-bubble">
-          <span class="streaming-cursor">▊</span>
-        </div>
-        <div class="message-meta-row">
-          <div class="message-actions bot-actions" style="display: none;">
-            <button class="btn-msg-action btn-copy-msg" title="Salin Jawaban">
-              <i class="fa-regular fa-copy"></i>
-            </button>
-          </div>
-          <span class="message-time">${getTimeString()}</span>
-        </div>
-      </div>
-    `;
-    messagesList.appendChild(row);
-    return {
-      row,
-      bubble: row.querySelector('.message-bubble'),
-      timeEl: row.querySelector('.message-time'),
-      actionsEl: row.querySelector('.bot-actions'),
-    };
-  }
-
-  function updateStreamingBubble(bubble, markdownText) {
-    let renderedHtml = '';
-    try {
-      renderedHtml = window.marked ? marked.parse(markdownText) : escapeHtml(markdownText);
-    } catch {
-      renderedHtml = escapeHtml(markdownText);
-    }
-    bubble.innerHTML = renderedHtml + '<span class="streaming-cursor">▊</span>';
-  }
-
-  function finalizeStreamingBubble(row, markdownText) {
-    const bubble = row.querySelector('.message-bubble');
-    let renderedHtml = '';
-    try {
-      renderedHtml = window.marked ? marked.parse(markdownText) : escapeHtml(markdownText);
-    } catch {
-      renderedHtml = escapeHtml(markdownText);
-    }
-    bubble.innerHTML = renderedHtml;
-    attachCodeCopyButtons(row);
-
-    // Show bot copy action button
-    const actionsEl = row.querySelector('.bot-actions');
-    if (actionsEl) {
-      actionsEl.style.display = 'flex';
-      const copyBtn = actionsEl.querySelector('.btn-copy-msg');
-      if (copyBtn) {
-        copyBtn.onclick = async () => {
-          try {
-            await navigator.clipboard.writeText(markdownText);
-            copyBtn.innerHTML = `<i class="fa-solid fa-check" style="color: #16a34a;"></i>`;
-            setTimeout(() => {
-              copyBtn.innerHTML = `<i class="fa-regular fa-copy"></i>`;
-            }, 1800);
-          } catch (e) {
-            console.error(e);
-          }
-        };
-      }
-    }
-  }
-
-  function attachCodeCopyButtons(container) {
-    const codeBlocks = container.querySelectorAll('pre');
-    codeBlocks.forEach((pre) => {
-      if (pre.parentElement && pre.parentElement.classList.contains('code-wrapper')) return;
-
-      const codeElement = pre.querySelector('code');
-      const codeText = codeElement ? codeElement.innerText : pre.innerText;
-
-      const wrapper = document.createElement('div');
-      wrapper.className = 'code-wrapper';
-
-      const header = document.createElement('div');
-      header.className = 'code-header';
-
-      let lang = 'CODE';
-      if (codeElement) {
-        const classList = Array.from(codeElement.classList);
-        const langClass = classList.find((c) => c.startsWith('language-'));
-        if (langClass) lang = langClass.replace('language-', '').toUpperCase();
-      }
-
-      header.innerHTML = `
-        <span>[ ${lang} ]</span>
-        <button class="code-copy-btn">
-          <i class="fa-regular fa-copy"></i>
-          SALIN
-        </button>
-      `;
-
-      const copyBtn = header.querySelector('.code-copy-btn');
-      copyBtn.addEventListener('click', async () => {
-        try {
-          await navigator.clipboard.writeText(codeText);
-          copyBtn.innerHTML = `<i class="fa-solid fa-check" style="color: #16a34a;"></i> TERSALIN!`;
-          setTimeout(() => {
-            copyBtn.innerHTML = `
-              <i class="fa-regular fa-copy"></i>
-              SALIN
-            `;
-          }, 2000);
-        } catch (e) {
-          console.error(e);
-        }
-      });
-
-      pre.parentNode.insertBefore(wrapper, pre);
-      wrapper.appendChild(header);
-      wrapper.appendChild(pre);
-    });
-  }
-
-  function renderBotMessageToDOM(markdownText, timeStr) {
-    const row = document.createElement('div');
-    row.className = 'message-row bot';
-
-    let renderedHtml = '';
-    try {
-      renderedHtml = window.marked ? marked.parse(markdownText) : escapeHtml(markdownText);
-    } catch {
-      renderedHtml = escapeHtml(markdownText);
-    }
-
-    row.innerHTML = `
-      <div class="avatar bot-avatar" title="Chatbot AI"><i class="fa-solid fa-robot"></i></div>
-      <div class="message-content">
-        <div class="message-bubble">
-          ${renderedHtml}
-        </div>
-        <div class="message-meta-row">
-          <div class="message-actions bot-actions">
-            <button class="btn-msg-action btn-copy-msg" title="Salin Jawaban">
-              <i class="fa-regular fa-copy"></i>
-            </button>
-          </div>
-          <span class="message-time">${timeStr || getTimeString()}</span>
-        </div>
-      </div>
-    `;
-
-    // Hook up copy button
-    const copyBtn = row.querySelector('.btn-copy-msg');
-    if (copyBtn) {
-      copyBtn.addEventListener('click', async () => {
-        try {
-          await navigator.clipboard.writeText(markdownText);
-          copyBtn.innerHTML = `<i class="fa-solid fa-check" style="color: #16a34a;"></i>`;
-          setTimeout(() => {
-            copyBtn.innerHTML = `<i class="fa-regular fa-copy"></i>`;
-          }, 1800);
-        } catch (e) {
-          console.error(e);
-        }
-      });
-    }
-
-    attachCodeCopyButtons(row);
-    messagesList.appendChild(row);
-  }
-
-  function escapeHtml(str) {
-    if (!str) return '';
-    return str
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#039;');
-  }
-
-  // Initialize
+  // Init
   loadSessions();
 });
